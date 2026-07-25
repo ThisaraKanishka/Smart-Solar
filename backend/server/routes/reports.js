@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const Payment = require('../models/Payment');
+const Generation = require('../models/Generation');
 const { authenticateToken } = require('../middleware/auth');
 
 // GET /api/reports/monthly
@@ -9,18 +10,10 @@ router.get('/monthly', authenticateToken, async (req, res) => {
     const customerId = req.user.customer_id;
     const { year } = req.query;
 
-    const payments = await db.query(
-      `SELECT * FROM Payments WHERE customer_id = ? ORDER BY payment_id ASC`,
-      [customerId]
-    );
-
-    const generation = await db.query(
-      `SELECT date, generated_kwh, used_kwh, exported_kwh, weather 
-       FROM Generation 
-       WHERE customer_id = ? 
-       ORDER BY date DESC LIMIT 30`,
-      [customerId]
-    );
+    const payments = await Payment.find({ customer_id: customerId }).sort({ _id: 1 });
+    const generation = await Generation.find({ customer_id: customerId })
+      .sort({ date: -1 })
+      .limit(30);
 
     res.json({
       year: year || '2026',

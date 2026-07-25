@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const db = require('../db');
+const Customer = require('../models/Customer');
+const Package = require('../models/Package');
 const { JWT_SECRET, authenticateToken } = require('../middleware/auth');
 
 // POST /api/auth/login
@@ -13,24 +14,19 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    const users = await db.query(
-      `SELECT c.*, p.package_name, p.rate_per_kwh 
-       FROM Customers c 
-       LEFT JOIN Packages p ON c.package_id = p.package_id 
-       WHERE c.email = ?`,
-      [email]
-    );
+    const user = await Customer.findOne({ email });
 
-    if (users.length === 0) {
+    if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    const user = users[0];
     const match = await bcrypt.compare(password, user.password);
 
     if (!match) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
+
+    const pkg = await Package.findOne({ package_id: user.package_id });
 
     const token = jwt.sign(
       {
@@ -44,8 +40,12 @@ router.post('/login', async (req, res) => {
       { expiresIn: '24h' }
     );
 
-    const userPayload = { ...user };
+    const userPayload = user.toObject();
     delete userPayload.password;
+    if (pkg) {
+      userPayload.package_name = pkg.package_name;
+      userPayload.rate_per_kwh = pkg.rate_per_kwh;
+    }
 
     res.json({
       message: 'Login successful',
@@ -61,21 +61,23 @@ router.post('/login', async (req, res) => {
 // GET /api/auth/me
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const users = await db.query(
-      `SELECT c.*, p.package_name, p.rate_per_kwh, p.capacity_kw as pkg_capacity
-       FROM Customers c 
-       LEFT JOIN Packages p ON c.package_id = p.package_id 
-       WHERE c.customer_id = ?`,
-      [req.user.customer_id]
-    );
+    const user = await Customer.findOne({ customer_id: req.user.customer_id });
 
-    if (users.length === 0) {
+    if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const user = users[0];
-    delete user.password;
-    res.json({ user });
+    const pkg = await Package.findOne({ package_id: user.package_id });
+
+    const userPayload = user.toObject();
+    delete userPayload.password;
+    if (pkg) {
+      userPayload.package_name = pkg.package_name;
+      userPayload.rate_per_kwh = pkg.rate_per_kwh;
+      userPayload.pkg_capacity = pkg.capacity_kw;
+    }
+
+    res.json({ user: userPayload });
   } catch (err) {
     console.error('Me endpoint error:', err);
     res.status(500).json({ error: 'Internal server error' });

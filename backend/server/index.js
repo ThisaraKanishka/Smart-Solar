@@ -1,9 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const db = require('./db');
 const seedDatabase = require('./seed');
+const Customer = require('./models/Customer');
 
 const authRoutes = require('./routes/auth');
 const customerRoutes = require('./routes/customer');
@@ -33,7 +33,7 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     system: 'Smart Solar Energy Management System Backend',
     timestamp: new Date().toISOString(),
-    dbMode: db.getDbMode()
+    dbMode: 'MongoDB Atlas'
   });
 });
 
@@ -42,22 +42,22 @@ const startServer = async () => {
   try {
     await db.initDb();
     
-    // Check if Customers table has data, if not run auto-seeder
+    // Check if Customers collection in MongoDB Atlas is empty, if so auto-seed
     try {
-      const custs = await db.query('SELECT COUNT(*) as count FROM Customers');
-      if (!custs || custs[0].count === 0) {
-        console.log('Database empty, auto-seeding sample data...');
+      const custCount = await Customer.countDocuments();
+      if (custCount === 0) {
+        console.log('MongoDB collection empty, auto-seeding sample data...');
         await seedDatabase();
       }
     } catch (e) {
-      console.log('Initial check failed, running database seeder...');
+      console.log('Initial MongoDB check failed, seeding Atlas database...');
       await seedDatabase();
     }
 
     app.listen(PORT, () => {
       console.log(`=================================================`);
       console.log(`  Smart Solar Energy Backend running on port ${PORT}`);
-      console.log(`  Database Mode: [${db.getDbMode().toUpperCase()}]`);
+      console.log(`  Database Mode: [MONGODB ATLAS EXCLUSIVE]`);
       console.log(`  Health check: http://localhost:${PORT}/api/health`);
       console.log(`=================================================`);
     });

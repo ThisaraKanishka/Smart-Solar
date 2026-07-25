@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const Customer = require('../models/Customer');
+const Package = require('../models/Package');
+const Generation = require('../models/Generation');
+const Payment = require('../models/Payment');
+const Maintenance = require('../models/Maintenance');
 const { authenticateToken } = require('../middleware/auth');
 
 // POST /api/chat/query
@@ -15,32 +19,28 @@ router.post('/query', authenticateToken, async (req, res) => {
 
     const q = question.toLowerCase();
 
-    // Fetch customer details
-    const custRes = await db.query(
-      `SELECT c.*, p.package_name, p.scheme_type, p.rate_per_kwh 
-       FROM Customers c 
-       LEFT JOIN Packages p ON c.package_id = p.package_id 
-       WHERE c.customer_id = ?`,
-      [customerId]
-    );
+    const customer = await Customer.findOne({ customer_id: customerId });
+    const pkg = await Package.findOne({ package_id: customer?.package_id });
 
-    const customer = custRes[0] || { first_name: 'Customer', rate_per_kwh: 48.00, package_name: 'Gold Net Accounting', scheme_type: 'Net Accounting' };
-    const rate = Number(customer.rate_per_kwh || 48.00);
+    const custName = customer?.first_name || 'Customer';
+    const schemeType = pkg?.scheme_type || 'Net Accounting';
+    const packageName = pkg?.package_name || 'Gold Net Accounting';
+    const rate = Number(pkg?.rate_per_kwh || 48.00);
 
     let reply = '';
     let stats = [];
     let chartConfig = null;
 
-    // SCHEME INTENT 1: Net Metering / Net Accounting / Net Plus / CEB / LECO
+    // SCHEME INTENT
     if (q.includes('net metering') || q.includes('net accounting') || q.includes('net plus') || q.includes('scheme') || q.includes('ceb') || q.includes('leco')) {
       reply = `In Sri Lanka, the Ceylon Electricity Board (CEB) and Lanka Electricity Company (LECO) offer 3 official solar schemes:\n\n` +
         `🔋 **Net Metering**: You use solar energy for your home and export excess. You earn energy credits to offset grid usage (credits carry forward up to 10 years).\n` +
         `💰 **Net Accounting**: You use solar energy for home, and receive a monthly monetary credit for exported units at fixed feed-in rates.\n` +
         `🔄 **Net Plus**: 100% of your solar output is exported directly to the grid for cash payouts (no self-consumption).\n\n` +
-        `Your current system operates under **${customer.scheme_type || 'Net Accounting'}** (${customer.package_name}). Official guidelines available at [www.ceb.lk](https://www.ceb.lk) and [www.leco.lk](https://www.leco.lk).`;
+        `Your current system operates under **${schemeType}** (${packageName}). Official guidelines available at [www.ceb.lk](https://www.ceb.lk) and [www.leco.lk](https://www.leco.lk).`;
 
       stats = [
-        { label: 'Current Scheme', value: customer.scheme_type || 'Net Accounting' },
+        { label: 'Current Scheme', value: schemeType },
         { label: 'Feed-in Tariff Rate', value: `Rs. ${rate.toFixed(2)}/kWh` },
         { label: 'Official CEB Portal', value: 'www.ceb.lk' },
         { label: 'Official LECO Portal', value: 'www.leco.lk' }
@@ -48,17 +48,14 @@ router.post('/query', authenticateToken, async (req, res) => {
 
     // INTENT 2: Today's Generation
     } else if (q.includes('today') && (q.includes('generate') || q.includes('power') || q.includes('kwh') || q.includes('much'))) {
-      const todayGen = await db.query(
-        `SELECT * FROM Generation WHERE customer_id = ? AND date = '2026-07-24'`,
-        [customerId]
-      );
+      const todayGenRecord = await Generation.findOne({ customer_id: customerId, date: '2026-07-24' });
 
-      const gen = todayGen[0]?.generated_kwh || 31.4;
-      const used = todayGen[0]?.used_kwh || 12.8;
-      const exp = todayGen[0]?.exported_kwh || 18.6;
+      const gen = todayGenRecord?.generated_kwh || 31.4;
+      const used = todayGenRecord?.used_kwh || 12.8;
+      const exp = todayGenRecord?.exported_kwh || 18.6;
       const earnings = (exp * rate).toFixed(2);
 
-      reply = `Today, your solar energy system generated **${gen} kWh** of clean electricity under the **${customer.scheme_type || 'Net Accounting'}** scheme. You consumed **${used} kWh** at home and exported **${exp} kWh** back to the national grid, earning **Rs. ${Number(earnings).toLocaleString()}**.`;
+      reply = `Today, your solar energy system generated **${gen} kWh** of clean electricity under the **${schemeType}** scheme. You consumed **${used} kWh** at home and exported **${exp} kWh** back to the national grid, earning **Rs. ${Number(earnings).toLocaleString()}**.`;
       
       stats = [
         { label: "Today's Generation", value: `${gen} kWh` },
@@ -86,15 +83,11 @@ router.post('/query', authenticateToken, async (req, res) => {
         ]
       };
 
-    // INTENT 3: Last 7 Days / Last week / Highest day
+    // INTENT 3: Last 7 Days / Last week
     } else if (q.includes('7 days') || q.includes('week') || q.includes('highest day') || q.includes('highest generation')) {
-      const dailyRows = await db.query(
-        `SELECT date, generated_kwh, used_kwh, exported_kwh 
-         FROM Generation 
-         WHERE customer_id = ? 
-         ORDER BY date DESC LIMIT 7`,
-        [customerId]
-      );
+      const dailyRows = await Generation.find({ customer_id: customerId })
+        .sort({ date: -1 })
+        .limit(7);
 
       const data = dailyRows.reverse();
       let total7 = 0;
@@ -136,17 +129,13 @@ router.post('/query', authenticateToken, async (req, res) => {
 
     // INTENT 4: Monthly Generation / Money this month
     } else if (q.includes('month') || q.includes('money') || q.includes('export') || q.includes('earn')) {
-      const monthRows = await db.query(
-        `SELECT month, generated_units, consumed_units, exported_units, amount 
-         FROM Payments 
-         WHERE customer_id = ? 
-         ORDER BY payment_id DESC LIMIT 6`,
-        [customerId]
-      );
+      const monthRows = await Payment.find({ customer_id: customerId })
+        .sort({ _id: -1 })
+        .limit(6);
 
       const latestMonth = monthRows[0] || { month: 'July 2026', generated_units: 784.5, exported_units: 455.0, amount: 21840.0 };
 
-      reply = `In **${latestMonth.month}**, your total solar generation reached **${latestMonth.generated_units} kWh**. Under your **${customer.scheme_type || 'Net Accounting'}** scheme, you exported **${latestMonth.exported_units} kWh** at Rs. ${rate.toFixed(2)}/kWh, yielding expected earnings of **Rs. ${Number(latestMonth.amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}**.`;
+      reply = `In **${latestMonth.month}**, your total solar generation reached **${latestMonth.generated_units} kWh**. Under your **${schemeType}** scheme, you exported **${latestMonth.exported_units} kWh** at Rs. ${rate.toFixed(2)}/kWh, yielding expected earnings of **Rs. ${Number(latestMonth.amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}**.`;
 
       stats = [
         { label: 'Month Generation', value: `${latestMonth.generated_units} kWh` },
@@ -174,12 +163,9 @@ router.post('/query', authenticateToken, async (req, res) => {
 
     // INTENT 5: Maintenance
     } else if (q.includes('maint') || q.includes('clean') || q.includes('service') || q.includes('status')) {
-      const maint = await db.query(
-        `SELECT * FROM Maintenance WHERE customer_id = ?`,
-        [customerId]
-      );
+      const maint = await Maintenance.findOne({ customer_id: customerId });
 
-      const m = maint[0] || {
+      const m = maint || {
         panel_status: 'Optimal - 98.4% Efficiency',
         battery_status: 'Healthy - 96% Capacity',
         inverter_status: 'Active - 99.1% Efficiency',
@@ -199,23 +185,22 @@ router.post('/query', authenticateToken, async (req, res) => {
 
     // INTENT 6: Package details
     } else if (q.includes('package') || q.includes('capacity') || q.includes('plan') || q.includes('warranty')) {
-      reply = `You are currently subscribed to the **${customer.package_name}** package under the **${customer.scheme_type || 'Net Accounting'}** scheme with a capacity of **${customer.panel_capacity} kW** and battery storage of **${customer.battery_capacity} kWh**. Your feed-in tariff is **Rs. ${rate.toFixed(2)}/kWh**.`;
+      reply = `You are currently subscribed to the **${packageName}** package under the **${schemeType}** scheme with a capacity of **${customer?.panel_capacity || 10} kW** and battery storage of **${customer?.battery_capacity || 10} kWh**. Your feed-in tariff is **Rs. ${rate.toFixed(2)}/kWh**.`;
 
       stats = [
-        { label: 'Solar Package', value: customer.package_name },
-        { label: 'Scheme Type', value: customer.scheme_type || 'Net Accounting' },
-        { label: 'System Capacity', value: `${customer.panel_capacity} kW` },
+        { label: 'Solar Package', value: packageName },
+        { label: 'Scheme Type', value: schemeType },
+        { label: 'System Capacity', value: `${customer?.panel_capacity || 10} kW` },
         { label: 'Export Tariff Rate', value: `Rs. ${rate.toFixed(2)}/kWh` }
       ];
 
     // INTENT 7: CO2 Saved
     } else if (q.includes('co2') || q.includes('carbon') || q.includes('tree') || q.includes('save') || q.includes('environment')) {
-      const sumRes = await db.query(
-        `SELECT SUM(generated_kwh) as total_gen FROM Generation WHERE customer_id = ?`,
-        [customerId]
-      );
+      const records = await Generation.find({ customer_id: customerId });
+      let totalGen = 0;
+      records.forEach(r => { totalGen += r.generated_kwh; });
 
-      const totalGen = sumRes[0]?.total_gen ? Number(sumRes[0].total_gen) : 4820.0;
+      if (totalGen === 0) totalGen = 4820.0;
       const co2SavedKg = (totalGen * 0.709).toFixed(1);
       const treesEquivalent = Math.round(co2SavedKg / 20);
 
@@ -246,7 +231,7 @@ router.post('/query', authenticateToken, async (req, res) => {
 
     // DEFAULT INTENT
     } else {
-      reply = `Hello ${customer.first_name}! I am your Smart Solar AI Assistant. I can answer questions about your energy generation, grid exports, Net Metering vs Net Accounting schemes, CEB/LECO tariffs, maintenance schedule, or CO₂ reduction. Try asking:\n• *"What is the difference between Net Metering and Net Accounting?"*\n• *"How much electricity did I generate today?"*\n• *"How much money will I receive this month?"*\n• *"When is my next maintenance?"*`;
+      reply = `Hello ${custName}! I am your Smart Solar AI Assistant. I can answer questions about your energy generation, grid exports, Net Metering vs Net Accounting schemes, CEB/LECO tariffs, maintenance schedule, or CO₂ reduction. Try asking:\n• *"What is the difference between Net Metering and Net Accounting?"*\n• *"How much electricity did I generate today?"*\n• *"How much money will I receive this month?"*\n• *"When is my next maintenance?"*`;
     }
 
     res.json({

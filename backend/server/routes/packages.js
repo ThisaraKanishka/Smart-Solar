@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const Package = require('../models/Package');
 
 // GET /api/packages
 router.get('/', async (req, res) => {
   try {
-    const packages = await db.query(`SELECT * FROM Packages ORDER BY capacity_kw ASC`);
+    const packages = await Package.find({}).sort({ capacity_kw: 1 });
     res.json({ packages });
   } catch (err) {
     console.error('Packages error:', err);
