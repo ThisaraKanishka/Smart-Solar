@@ -13,7 +13,7 @@ const chatRoutes = require('./routes/chat');
 const reportRoutes = require('./routes/reports');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+let PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors());
@@ -37,12 +37,28 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Start Server
+// Start Server with EADDRINUSE Port Handling
+const listenWithFallback = (server, port) => {
+  server.listen(port, () => {
+    console.log(`=================================================`);
+    console.log(`  Smart Solar Energy Backend running on port ${port}`);
+    console.log(`  Database Mode: [MONGODB ATLAS EXCLUSIVE]`);
+    console.log(`  Health check: http://localhost:${port}/api/health`);
+    console.log(`=================================================`);
+  }).on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`⚠️ Port ${port} is occupied, trying port ${port + 1}...`);
+      listenWithFallback(server, port + 1);
+    } else {
+      console.error('Server error:', err);
+    }
+  });
+};
+
 const startServer = async () => {
   try {
     await db.initDb();
     
-    // Check if Customers collection in MongoDB Atlas is empty, if so auto-seed
     try {
       const custCount = await Customer.countDocuments();
       if (custCount === 0) {
@@ -54,13 +70,7 @@ const startServer = async () => {
       await seedDatabase();
     }
 
-    app.listen(PORT, () => {
-      console.log(`=================================================`);
-      console.log(`  Smart Solar Energy Backend running on port ${PORT}`);
-      console.log(`  Database Mode: [MONGODB ATLAS EXCLUSIVE]`);
-      console.log(`  Health check: http://localhost:${PORT}/api/health`);
-      console.log(`=================================================`);
-    });
+    listenWithFallback(app, PORT);
   } catch (err) {
     console.error('Failed to start server:', err);
   }

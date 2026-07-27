@@ -3,17 +3,22 @@ const router = express.Router();
 const Customer = require('../models/Customer');
 const Package = require('../models/Package');
 const Generation = require('../models/Generation');
+const HourlyGeneration = require('../models/HourlyGeneration');
 const Payment = require('../models/Payment');
 const Maintenance = require('../models/Maintenance');
 const Notification = require('../models/Notification');
 const { authenticateToken } = require('../middleware/auth');
 
+// Helper for case-insensitive customer_id query filter
+const getCustIdFilter = (id) => new RegExp(`^${id}$`, 'i');
+
 // GET /api/customer/dashboard
 router.get('/dashboard', authenticateToken, async (req, res) => {
   try {
     const customerId = req.user.customer_id;
+    const custFilter = getCustIdFilter(customerId);
 
-    const customer = await Customer.findOne({ customer_id: customerId });
+    const customer = await Customer.findOne({ customer_id: custFilter });
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
@@ -21,56 +26,63 @@ router.get('/dashboard', authenticateToken, async (req, res) => {
     const pkg = await Package.findOne({ package_id: customer.package_id });
     const tariffRate = pkg?.rate_per_kwh || 48.00;
 
-    const todayStr = '2026-07-24';
-    const todayRecord = await Generation.findOne({ customer_id: customerId, date: todayStr });
+    const todayStr = new Date().toISOString().split('T')[0];
+    let todayRecord = await Generation.findOne({ customer_id: custFilter, date: todayStr });
 
-    let todayGen = 31.4;
-    let todayUsed = 12.8;
-    let todayExported = 18.6;
-    let batteryCharged = 6.2;
-    let weather = 'Sunny';
+    if (!todayRecord) {
+      todayRecord = await Generation.findOne({ customer_id: custFilter }).sort({ date: -1 });
+    }
 
-    if (todayRecord) {
-      todayGen = Number(todayRecord.generated_kwh);
-      todayUsed = Number(todayRecord.used_kwh);
-      todayExported = Number(todayRecord.exported_kwh);
-      batteryCharged = Number(todayRecord.battery_charged);
-      weather = todayRecord.weather;
+    // Fallback: If no daily record, calculate today's totals from hourly records
+    let todayGen = todayRecord ? Number(todayRecord.generated_kwh) : 0;
+    let todayUsed = todayRecord ? Number(todayRecord.used_kwh) : 0;
+    let todayExported = todayRecord ? Number(todayRecord.exported_kwh) : 0;
+    let batteryCharged = todayRecord ? Number(todayRecord.battery_charged) : 0;
+    let weather = todayRecord ? todayRecord.weather : 'Clear';
+
+    if (!todayRecord) {
+      const todayHourly = await HourlyGeneration.find({ customer_id: custFilter });
+      todayHourly.forEach(h => {
+        todayGen += Number(h.generation_kwh || 0);
+        todayUsed += Number(h.consumption_kwh || 0);
+      });
+      todayExported = Math.max(0, todayGen - todayUsed);
+      batteryCharged = Number((todayGen * 0.15).toFixed(1));
     }
 
     const todayEarnings = Number((todayExported * tariffRate).toFixed(2));
 
-    const monthGenRecords = await Generation.find({
-      customer_id: customerId,
-      date: { $gte: '2026-07-01', $lte: '2026-07-31' }
-    });
-
+    const monthGenRecords = await Generation.find({ customer_id: custFilter });
     let currentMonthGen = 0;
     let currentMonthExport = 0;
+
     monthGenRecords.forEach(r => {
-      currentMonthGen += r.generated_kwh;
-      currentMonthExport += r.exported_kwh;
+      currentMonthGen += Number(r.generated_kwh || 0);
+      currentMonthExport += Number(r.exported_kwh || 0);
     });
 
-    if (currentMonthGen === 0) currentMonthGen = 784.5;
-    if (currentMonthExport === 0) currentMonthExport = 455.0;
+    if (currentMonthGen === 0) {
+      currentMonthGen = todayGen;
+      currentMonthExport = todayExported;
+    }
 
     const co2ReductionKg = Number((currentMonthGen * 0.709).toFixed(1));
 
     const insights = [
-      `Generation increased by 8.4% compared to last month.`,
-      `Highest generation day this week reached 34.2 kWh on Wednesday.`,
-      `Estimated grid export payment this month is Rs. ${(currentMonthExport * tariffRate).toLocaleString('en-US', { minimumFractionDigits: 2 })}.`,
-      `Home consumed ${((todayUsed / (todayGen || 1)) * 100).toFixed(0)}% of total solar output today.`,
-      `${((todayExported / (todayGen || 1)) * 100).toFixed(0)}% of generated electricity was exported to the national grid.`,
-      `Battery achieved 100% full charge by 1:30 PM.`
+      currentMonthGen > 0 
+        ? `Total solar generation logged in database is ${currentMonthGen.toFixed(1)} kWh.`
+        : `No generation data currently recorded in database for account ${customerId}.`,
+      todayGen > 0 
+        ? `Latest solar generation logged: ${todayGen.toFixed(1)} kWh.`
+        : `Awaiting daily generation logs.`,
+      `Export tariff rate under ${pkg?.scheme_type || 'Net Scheme'} is Rs. ${tariffRate.toFixed(2)}/kWh.`
     ];
 
     res.json({
       kpis: {
-        todayGeneration: todayGen,
-        todayConsumption: todayUsed,
-        exportedToGrid: todayExported,
+        todayGeneration: Number(todayGen.toFixed(1)),
+        todayConsumption: Number(todayUsed.toFixed(1)),
+        exportedToGrid: Number(todayExported.toFixed(1)),
         todayEarnings: todayEarnings,
         currentMonthGeneration: Number(currentMonthGen.toFixed(1)),
         co2ReductionKg: co2ReductionKg,
@@ -84,7 +96,7 @@ router.get('/dashboard', authenticateToken, async (req, res) => {
         email: customer.email,
         phone: customer.phone,
         address: customer.address,
-        package: pkg?.package_name || 'Gold Ultra',
+        package: pkg?.package_name || 'Standard Package',
         panelCapacity: customer.panel_capacity,
         batteryCapacity: customer.battery_capacity,
         installationDate: customer.installation_date,
@@ -98,55 +110,111 @@ router.get('/dashboard', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/customer/generation/charts
+// GET /api/customer/generation/charts - Smart Multi-Source Auto-Aggregation for All 8 Charts
 router.get('/generation/charts', authenticateToken, async (req, res) => {
   try {
     const customerId = req.user.customer_id;
+    const custFilter = getCustIdFilter(customerId);
 
-    const hourlyData = [];
-    const hours = ['06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
-    const genMultipliers = [0.1, 0.4, 0.9, 1.8, 2.7, 3.4, 3.8, 3.6, 3.1, 2.2, 1.2, 0.4, 0.0];
-    const conMultipliers = [1.2, 1.8, 1.4, 1.0, 0.9, 0.8, 1.1, 1.0, 0.9, 1.1, 1.5, 2.1, 2.4];
+    const customer = await Customer.findOne({ customer_id: custFilter });
+    const pkg = customer ? await Package.findOne({ package_id: customer.package_id }) : null;
+    const tariffRate = pkg?.rate_per_kwh || 48.00;
 
-    for (let i = 0; i < hours.length; i++) {
-      hourlyData.push({
-        time: hours[i],
-        generation: Number((genMultipliers[i] * 0.95).toFixed(2)),
-        consumption: Number((conMultipliers[i] * 0.85).toFixed(2))
-      });
-    }
+    // 1. Raw Hourly Records from MongoDB Atlas (Case Insensitive)
+    const hourlyRecords = await HourlyGeneration.find({ customer_id: custFilter })
+      .sort({ hour: 1 });
 
-    const dailyRecords = await Generation.find({ customer_id: customerId })
+    const hoursOrder = ['06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
+    const hourlyMap = {};
+    hourlyRecords.forEach(r => {
+      hourlyMap[r.hour] = {
+        generation: Number(r.generation_kwh || 0),
+        consumption: Number(r.consumption_kwh || 0)
+      };
+    });
+
+    const hourlyData = hoursOrder.map(h => ({
+      time: h,
+      generation: hourlyMap[h] ? hourlyMap[h].generation : 0,
+      consumption: hourlyMap[h] ? hourlyMap[h].consumption : 0
+    }));
+
+    // 2. Daily Generation Records from MongoDB Atlas (Case Insensitive)
+    let dailyRecords = await Generation.find({ customer_id: custFilter })
       .sort({ date: -1 })
       .limit(30);
 
-    const dailyData = dailyRecords.reverse().map(r => ({
-      date: r.date.slice(5),
-      generated: Number(r.generated_kwh),
-      consumed: Number(r.used_kwh),
-      exported: Number(r.exported_kwh),
+    let dailyData = dailyRecords.reverse().map(r => ({
+      date: r.date.length >= 5 ? r.date.slice(5) : r.date,
+      generated: Number(r.generated_kwh || 0),
+      consumed: Number(r.used_kwh || 0),
+      exported: Number(r.exported_kwh || 0),
       weather: r.weather
     }));
 
-    const monthlyPayments = await Payment.find({ customer_id: customerId })
+    // Fallback: If no daily records exist, derive daily data from hourly records
+    if (dailyData.length === 0 && hourlyRecords.length > 0) {
+      let sumGen = 0;
+      let sumCon = 0;
+      hourlyRecords.forEach(h => {
+        sumGen += Number(h.generation_kwh || 0);
+        sumCon += Number(h.consumption_kwh || 0);
+      });
+      const todayShort = new Date().toISOString().slice(5);
+      dailyData = [{
+        date: todayShort,
+        generated: Number(sumGen.toFixed(1)),
+        consumed: Number(sumCon.toFixed(1)),
+        exported: Number(Math.max(0, sumGen - sumCon).toFixed(1)),
+        weather: 'Sunny'
+      }];
+    }
+
+    // 3. Monthly Payments & Export Earnings from MongoDB Atlas
+    const monthlyPayments = await Payment.find({ customer_id: custFilter })
       .sort({ createdAt: 1 })
       .limit(12);
 
-    const monthlyData = monthlyPayments.map(p => ({
-      month: p.month.split(' ')[0].slice(0, 3),
-      fullMonth: p.month,
-      generated: Number(p.generated_units),
-      consumed: Number(p.consumed_units),
-      exported: Number(p.exported_units),
-      earnings: Number(p.amount),
-      co2: Number((p.generated_units * 0.709).toFixed(1))
+    let monthlyData = monthlyPayments.map(p => ({
+      month: p.month ? p.month.split(' ')[0].slice(0, 3) : 'Mth',
+      fullMonth: p.month || 'Month',
+      generated: Number(p.generated_units || 0),
+      consumed: Number(p.consumed_units || 0),
+      exported: Number(p.exported_units || 0),
+      earnings: Number(p.amount || 0),
+      co2: Number((Number(p.generated_units || 0) * 0.709).toFixed(1))
     }));
 
-    const latestGen = dailyData[dailyData.length - 1] || { generated: 31.4, consumed: 12.8, exported: 18.6 };
+    // Fallback: If no payment records exist, derive monthly totals from daily/hourly records
+    if (monthlyData.length === 0 && dailyData.length > 0) {
+      let totalGen = 0;
+      let totalCon = 0;
+      let totalExp = 0;
+      dailyData.forEach(d => {
+        totalGen += d.generated;
+        totalCon += d.consumed;
+        totalExp += d.exported;
+      });
+
+      const currentMonthLabel = new Date().toLocaleString('en-US', { month: 'short' });
+      monthlyData = [{
+        month: currentMonthLabel,
+        fullMonth: `${currentMonthLabel} 2026`,
+        generated: Number(totalGen.toFixed(1)),
+        consumed: Number(totalCon.toFixed(1)),
+        exported: Number(totalExp.toFixed(1)),
+        earnings: Number((totalExp * tariffRate).toFixed(2)),
+        co2: Number((totalGen * 0.709).toFixed(1))
+      }];
+    }
+
+    // 4. Power Distribution Share (%) from latest raw generation record
+    const latestGen = dailyData.length > 0 ? dailyData[dailyData.length - 1] : { generated: 0, consumed: 0, exported: 0 };
+    const batteryValue = Number((latestGen.generated * 0.15).toFixed(1));
     const distributionData = [
       { name: 'Home Consumption', value: latestGen.consumed, fill: '#3B82F6' },
       { name: 'Exported to Grid', value: latestGen.exported, fill: '#10B981' },
-      { name: 'Battery Storage', value: Number((latestGen.generated * 0.15).toFixed(1)), fill: '#F59E0B' }
+      { name: 'Battery Storage', value: batteryValue, fill: '#F59E0B' }
     ];
 
     res.json({
@@ -170,7 +238,8 @@ router.get('/generation/charts', authenticateToken, async (req, res) => {
 router.get('/payments', authenticateToken, async (req, res) => {
   try {
     const customerId = req.user.customer_id;
-    const payments = await Payment.find({ customer_id: customerId }).sort({ _id: -1 });
+    const custFilter = getCustIdFilter(customerId);
+    const payments = await Payment.find({ customer_id: custFilter }).sort({ _id: -1 });
     res.json({ payments });
   } catch (err) {
     console.error('Payments error:', err);
@@ -182,7 +251,8 @@ router.get('/payments', authenticateToken, async (req, res) => {
 router.get('/maintenance', authenticateToken, async (req, res) => {
   try {
     const customerId = req.user.customer_id;
-    const record = await Maintenance.findOne({ customer_id: customerId });
+    const custFilter = getCustIdFilter(customerId);
+    const record = await Maintenance.findOne({ customer_id: custFilter });
     if (!record) {
       return res.json({
         maintenance: {
@@ -207,7 +277,8 @@ router.get('/maintenance', authenticateToken, async (req, res) => {
 router.get('/notifications', authenticateToken, async (req, res) => {
   try {
     const customerId = req.user.customer_id;
-    const notifications = await Notification.find({ customer_id: customerId }).sort({ createdAt: -1 });
+    const custFilter = getCustIdFilter(customerId);
+    const notifications = await Notification.find({ customer_id: custFilter }).sort({ createdAt: -1 });
     res.json({ notifications });
   } catch (err) {
     console.error('Notifications error:', err);
@@ -220,7 +291,8 @@ router.put('/notifications/:id/read', authenticateToken, async (req, res) => {
   try {
     const notifId = req.params.id;
     const customerId = req.user.customer_id;
-    await Notification.updateOne({ _id: notifId, customer_id: customerId }, { status: 'read' });
+    const custFilter = getCustIdFilter(customerId);
+    await Notification.updateOne({ _id: notifId, customer_id: custFilter }, { status: 'read' });
     res.json({ message: 'Notification marked as read' });
   } catch (err) {
     console.error('Mark read error:', err);
@@ -232,9 +304,10 @@ router.put('/notifications/:id/read', authenticateToken, async (req, res) => {
 router.put('/profile', authenticateToken, async (req, res) => {
   try {
     const customerId = req.user.customer_id;
+    const custFilter = getCustIdFilter(customerId);
     const { phone, address } = req.body;
 
-    await Customer.updateOne({ customer_id: customerId }, { phone, address });
+    await Customer.updateOne({ customer_id: custFilter }, { phone, address });
     res.json({ message: 'Profile updated successfully' });
   } catch (err) {
     console.error('Profile update error:', err);

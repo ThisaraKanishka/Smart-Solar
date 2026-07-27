@@ -5,6 +5,7 @@ const db = require('./db');
 const Package = require('./models/Package');
 const Customer = require('./models/Customer');
 const Generation = require('./models/Generation');
+const HourlyGeneration = require('./models/HourlyGeneration');
 const Payment = require('./models/Payment');
 const Maintenance = require('./models/Maintenance');
 const Notification = require('./models/Notification');
@@ -18,6 +19,7 @@ const seedDatabase = async () => {
   await Package.deleteMany({});
   await Customer.deleteMany({});
   await Generation.deleteMany({});
+  await HourlyGeneration.deleteMany({});
   await Payment.deleteMany({});
   await Maintenance.deleteMany({});
   await Notification.deleteMany({});
@@ -150,7 +152,7 @@ const seedDatabase = async () => {
   await Customer.insertMany(customers);
   console.log(`✓ ${customers.length} Customers & Admin seeded into MongoDB Atlas.`);
 
-  // 3. Seed Generation Data
+  // 3. Seed Daily Generation Data
   console.log('Seeding daily generation records...');
   const weatherTypes = ['Sunny', 'Sunny', 'Sunny', 'Partly Cloudy', 'Cloudy', 'Rainy'];
   const today = new Date('2026-07-24');
@@ -193,9 +195,35 @@ const seedDatabase = async () => {
   }
 
   await Generation.insertMany(generationDocs);
-  console.log(`✓ ${generationDocs.length} Generation records seeded into MongoDB Atlas.`);
+  console.log(`✓ ${generationDocs.length} Daily Generation records seeded into MongoDB Atlas.`);
 
-  // 4. Seed Monthly Payments
+  // 4. Seed Hourly Generation Data (06:00 to 18:00)
+  console.log('Seeding raw hourly generation records...');
+  const hoursList = ['06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
+  const genPattern = [0.1, 0.4, 0.9, 1.8, 2.7, 3.4, 3.8, 3.6, 3.1, 2.2, 1.2, 0.4, 0.0];
+  const conPattern = [1.0, 1.5, 1.2, 0.9, 0.8, 0.7, 0.9, 0.8, 0.7, 0.9, 1.3, 1.8, 2.1];
+
+  const hourlyDocs = [];
+  for (const cust of customers) {
+    if (cust.role === 'admin') continue;
+    
+    // Seed for today (2026-07-24)
+    const capRatio = cust.panel_capacity / 10.0;
+    for (let h = 0; h < hoursList.length; h++) {
+      hourlyDocs.push({
+        customer_id: cust.customer_id,
+        date: '2026-07-24',
+        hour: hoursList[h],
+        generation_kwh: Number((genPattern[h] * capRatio).toFixed(2)),
+        consumption_kwh: Number((conPattern[h] * capRatio).toFixed(2))
+      });
+    }
+  }
+
+  await HourlyGeneration.insertMany(hourlyDocs);
+  console.log(`✓ ${hourlyDocs.length} Raw Hourly records seeded into MongoDB Atlas.`);
+
+  // 5. Seed Monthly Payments
   console.log('Seeding monthly payments...');
   const monthNames = ['August 2025', 'September 2025', 'October 2025', 'November 2025', 'December 2025', 'January 2026', 'February 2026', 'March 2026', 'April 2026', 'May 2026', 'June 2026', 'July 2026'];
   const paymentDocs = [];
@@ -231,7 +259,7 @@ const seedDatabase = async () => {
   await Payment.insertMany(paymentDocs);
   console.log('✓ Payment histories seeded into MongoDB Atlas.');
 
-  // 5. Seed Maintenance
+  // 6. Seed Maintenance
   const maintDocs = [];
   for (const cust of customers) {
     if (cust.role === 'admin') continue;
@@ -249,7 +277,7 @@ const seedDatabase = async () => {
   await Maintenance.insertMany(maintDocs);
   console.log('✓ Maintenance records seeded into MongoDB Atlas.');
 
-  // 6. Seed Notifications
+  // 7. Seed Notifications
   const notifDocs = [];
   for (const cust of customers) {
     if (cust.role === 'admin') continue;

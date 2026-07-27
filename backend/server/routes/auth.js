@@ -4,7 +4,89 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Customer = require('../models/Customer');
 const Package = require('../models/Package');
+const Maintenance = require('../models/Maintenance');
+const Notification = require('../models/Notification');
 const { JWT_SECRET, authenticateToken } = require('../middleware/auth');
+
+// POST /api/auth/register - Create / Register New Customer via Postman
+router.post('/register', async (req, res) => {
+  try {
+    const {
+      first_name,
+      last_name,
+      email,
+      password,
+      phone,
+      address,
+      package_id,
+      panel_capacity,
+      battery_capacity
+    } = req.body;
+
+    if (!first_name || !last_name || !email || !password) {
+      return res.status(400).json({ error: 'first_name, last_name, email, and password are required' });
+    }
+
+    const existingUser = await Customer.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    // Auto-generate customer_id (e.g., CUST-1002, CUST-1003...)
+    const count = await Customer.countDocuments({ role: 'customer' });
+    const customer_id = `CUST-${1000 + count + 1}`;
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const selectedPkgId = Number(package_id) || 2;
+    const pkg = await Package.findOne({ package_id: selectedPkgId });
+
+    const newCustomer = await Customer.create({
+      customer_id,
+      first_name,
+      last_name,
+      email,
+      password: hashedPassword,
+      phone: phone || '+94 77 000 0000',
+      address: address || 'Colombo, Sri Lanka',
+      package_id: selectedPkgId,
+      installation_date: new Date().toISOString().split('T')[0],
+      status: 'Active',
+      panel_capacity: Number(panel_capacity) || pkg?.capacity_kw || 5.0,
+      battery_capacity: Number(battery_capacity) || 5.0,
+      role: 'customer'
+    });
+
+    // Create default Maintenance record
+    await Maintenance.create({
+      customer_id,
+      panel_status: 'Optimal - 99.0% Efficiency',
+      battery_status: 'Healthy - 100% Capacity',
+      inverter_status: 'Active - 99.5% Efficiency',
+      last_service: new Date().toISOString().split('T')[0],
+      next_service: '2026-12-01',
+      cleaning_schedule: 'Recommended in 30 Days'
+    });
+
+    // Create welcome Notification
+    await Notification.create({
+      customer_id,
+      title: 'Welcome to Smart Solar!',
+      message: `Your solar account ${customer_id} has been registered successfully.`,
+      status: 'unread'
+    });
+
+    const userPayload = newCustomer.toObject();
+    delete userPayload.password;
+
+    res.status(201).json({
+      message: 'Customer registered successfully in MongoDB Atlas',
+      customer: userPayload
+    });
+  } catch (err) {
+    console.error('Registration error:', err);
+    res.status(500).json({ error: 'Failed to register customer: ' + err.message });
+  }
+});
 
 // POST /api/auth/login
 router.post('/login', async (req, res) => {
